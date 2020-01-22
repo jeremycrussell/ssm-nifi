@@ -4,3 +4,4 @@ fixtures:
     archive: "puppet/archive"
     stdlib: "puppetlabs/stdlib"
     systemd: "camptocamp/systemd"
+    concat: "puppetlabs/concat"

@@ -37,6 +37,12 @@
 # @param install_root
 #   The root directory of the nifi installation.
 #
+# @param nifi_properties
+#   Properties for conf/nifi.properties
+#
+# @param bootstrap_conf
+#   Properties for config/bootstrap.conf
+#
 # @example Defaults
 #   include nifi
 #
@@ -48,6 +54,8 @@
 #   }
 #
 class nifi (
+  Hash $bootstrap_conf,
+  Hash $nifi_properties,
   String $version = '1.10.0',
   String $download_url = 'http://mirrors.ibiblio.org/apache/nifi/1.10.0/nifi-1.10.0-bin.tar.gz',
   String $download_checksum = 'fd4f0750d18137bb1c21cd0fd5ab8951ccd450e6f673b8988db93ea2ff408288',
@@ -60,6 +68,8 @@ class nifi (
   Stdlib::Absolutepath $install_root = '/opt/nifi',
 ) {
 
+  $nifi_home = "${install_root}/nifi-${version}"
+
   class { 'nifi::install':
     install_root           => $install_root,
     version                => $version,
@@ -71,11 +81,16 @@ class nifi (
     download_tmp_dir       => $download_tmp_dir,
   }
 
-  include nifi::config
+  class { 'nifi::config':
+    nifi_home       => $nifi_home,
+    user            => $user,
+    group           => $group,
+    bootstrap_conf  => $bootstrap_conf,
+    nifi_properties => $nifi_properties,
+  }
 
   class {'nifi::service':
-    install_root => $install_root,
-    version      => $version,
+    nifi_home    => $nifi_home,
     user         => $user,
     limit_nofile => $service_limit_nofile,
     limit_nproc  => $service_limit_nproc,

@@ -6,8 +6,7 @@ describe 'nifi::service' do
       let(:facts) { os_facts }
       let(:params) do
         {
-          install_root: '/test',
-          version: '1.0.0',
+          nifi_home: '/test/nifi-1.0.0',
           user: 'nifi',
           limit_nofile: 123,
           limit_nproc: 234,

@@ -4,15 +4,14 @@
 #
 # @api private
 class nifi::service (
-  Stdlib::Absolutepath $install_root,
-  String $version,
+  Stdlib::Absolutepath $nifi_home,
   String $user,
   Integer[0] $limit_nofile,
   Integer[0] $limit_nproc,
 ) {
 
   $service_params = {
-    'nifi_home'    => "${install_root}/nifi-${version}",
+    'nifi_home'    => $nifi_home,
     'user'         => $user,
     'limit_nofile' => $limit_nofile,
     'limit_nproc'  => $limit_nproc,
