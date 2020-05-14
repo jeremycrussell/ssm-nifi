@@ -112,6 +112,15 @@ use the Puppet CA for this.
 Managing this is on the roadmap for this module. For now, this can be
 handled in the profile which loads the nifi class.
 
+Note: The puppet certificates used must have the node fqdn as
+SubjectAlternateName, otherwise NiFi will not trust the connection.
+Add to puppet.conf, and regenerate your node certificate:
+
+```ini
+[main]
+dns_alt_names = $certname
+```
+
 #### Dependencies
 
 Add the `puppetlabs-java_ks` module to your environment to manage the
@@ -121,28 +130,32 @@ Java keystore and truststore used by NiFi.
 
 Make a nifi profile, which glues everything toghether.
 
-In this example the TLS key and certificate are class parameters. You
-can use Hiera for this, but I encourage you to make a fact for this.
-It will be useful for all other managed infrastructure that uses TLS,
-like metrics and logging.
+In this example the TLS key and certificate are from a custom fact.
+
+You can also use class parameters and Hiera for this, but I encourage
+you to make a fact for this. It will be useful for all other managed
+infrastructure that uses TLS, like metrics and logging.
 
 ```puppet
 class profile::nifi (
   $version,
   $checksum,
   $toolkit_checksum,
+  String $admin_identity,
+  Hash $cluster_nodes,
   Stdlib::Absolutepath $truststore = '/var/opt/nifi/nifi.ts',
   Stdlib::Absolutepath $keystore = '/var/opt/nifi/nifi.ks',
-  Stdlib::Absolutepath $hostprivkey = '/var/lib/puppet/ssl/private_keys/nifi-01.example.com.pem',
-  Stdlib::Absolutepath $hostcert = '/var/lib/puppet/ssl/certs/nifi-01.example.com.pem',
-  Stdlib::Absolutepath $localcacert = '/var/lib/puppet/ssl/certs/ca.pem',
-  String $storepassword = 'puppet',
+  String $storepassword = 'another somewhat secret password',
+  String $cluster_port = '11443',
 ) {
 
-  $url = "http://mirrors.ibiblio.org/apache/nifi/${version}/nifi-${version}-bin.tar.gz"
-  $toolkit_url = "http://mirrors.ibiblio.org/apache/nifi/${version}/nifi-toolkit-${version}-bin.tar.gz"
+  $config_dir = "/opt/nifi/nifi-${version}/conf"
 
-  class { 'java': }
+  # NiFi
+
+  $url = "http://example.com/apache/nifi/${version}/nifi-${version}-bin.tar.gz"
+  $toolkit_url = "http://example.com/apache/nifi/${version}/nifi-toolkit-${version}-bin.tar.gz"
+
   class { 'nifi':
     download_checksum => $checksum,
     download_url      => $url,
@@ -150,40 +163,33 @@ class profile::nifi (
     nifi_properties => {
 
       # Site to Site properties
-      'nifi.remote.input.host'          => $trusted['certname'],
-      'nifi.remote.input.secure'        => 'true',
-      'nifi.remote.input.socket.port'   => '10443',
+      'nifi.remote.input.host'                         => $trusted['certname'],
+      'nifi.remote.input.secure'                       => 'true',
+      'nifi.remote.input.socket.port'                  => '10443',
 
       # Web properties
-      'nifi.web.https.host'             => $trusted['certname'],
-      'nifi.web.https.port'             => '9443',
-      'nifi.web.http.port'              => '',
+      'nifi.web.https.host'                            => $trusted['certname'],
+      'nifi.web.https.port'                            => '9443',
+      'nifi.web.http.port'                             => '',
 
       # Security properties
-      'nifi.security.keystore'          => $keystore,
-      'nifi.security.keystorePasswd'    => $storepassword,
-      'nifi.security.keystoreType'      => 'jks',
-      'nifi.security.truststore'        => $truststore,
-      'nifi.security.truststorePasswd'  => $storepassword,
-      'nifi.security.truststoreType'    => 'jks',
-      'nifi.cluster.protocol.is.secure' => 'true',
+      'nifi.security.keystore'                         => $keystore,
+      'nifi.security.keystorePasswd'                   => $storepassword,
+      'nifi.security.keystoreType'                     => 'jks',
+      'nifi.security.truststore'                       => $truststore,
+      'nifi.security.truststorePasswd'                 => $storepassword,
+      'nifi.security.truststoreType'                   => 'jks',
+      'nifi.cluster.protocol.is.secure'                => 'true',
+      'nifi.security.user.authorizer'                  => 'file-provider',
 
-      # Host properties
-      'nifi.cluster.node.address'       => $trusted['certname'],
-      'nifi.cluster.node.protocol.port' => '11443',
+      # Cluster properties
+      'nifi.cluster.flow.election.max.candidates'      => '2',
+      'nifi.cluster.is.node'                           => 'true',
+      'nifi.cluster.node.address'                      => $trusted['certname'],
+      'nifi.cluster.node.protocol.port'                => '11443',
+      'nifi.state.management.embedded.zookeeper.start' => 'true',
+      'nifi.zookeeper.connect.string'                  => 'localhost:2181',
     }
-  }
-
-  # DIY part. You can use one of:
-  # - just a static file
-  # - template with data from hiera
-  # - puppetlabs-concat with exported concat::fragments from your nodes
-  # - augeas XML lens
-  # - something else
-  # see authorizers.xml for suggested contents below.
-  file { '/opt/nifi/current/conf/authorizers.xml':
-    notify  => Service['nifi.service'],
-    content => epp('profile/nifi/authorizers.xml.epp', { 'foo' => 'bar' } )
   }
 
   class { 'nifi_toolkit':
@@ -191,6 +197,23 @@ class profile::nifi (
     download_checksum => $toolkit_checksum,
     version           => $version,
   }
+
+  ## NiFi extra configuration
+
+  #  - this class manages my authorizers.xml and zookeeper.properties files,
+  #    which will be different in different environments.
+
+  class { 'nifi_config':
+    config_dir      => $config_dir,
+    admin_identity  => $admin_identity,
+    cluster_nodes   => $cluster_nodes,
+    require         => Class['nifi::install'],
+    notify          => Class['nifi::service'],
+  }
+
+  ## Runtime
+
+  class { 'java': }
 
   Package['java'] -> Service['nifi.service']
 
@@ -203,16 +226,17 @@ class profile::nifi (
 
   java_ks { 'nifi:truststore':
     target       => $truststore,
-    certificate  => $localcacert,
+    certificate  => $facts['my_puppet_settings']['localcacert'],
     trustcacerts => true,
   }
 
   java_ks { 'nifi:keystore':
     target      => $keystore,
-    certificate => $hostcert,
-    private_key => $hostprivkey,
+    certificate => $facts['my_puppet_settings']['hostcert'],
+    private_key => $facts['my_puppet_settings']['hostprivkey'],
   }
 }
+
 ```
 
 As soon as this is active, nifi will listens on TLS on port 9443, and
@@ -236,63 +260,108 @@ make it look like an email address, it will not.
 Create a PKCS12 bundle from the key and certificate, download it to
 your workstation, and add it to your web browser.
 
+
+#### Configuration class
+
+Custom NiFi configuration files can live in its own class, and be
+included from the profile.
+
+```puppet
+class nifi_config (
+  Stdlib::Absolutepath $config_dir,
+  String $admin_identity,
+  Hash[Stdlib::Fqdn, Struct[{id => Integer[1]}]] $cluster_nodes,
+  Stdlib::Absolutepath $state_dir = '/var/opt/nifi/state',
+) {
+
+  # - This assumes that all certificates have CN=host.example.com as DN
+  $node_identities = $cluster_nodes.map |$k, $v| { "CN=${k}" }
+
+  file { "${config_dir}/authorizers.xml":
+    content => epp('nifi_config/authorizers.xml.epp', {
+      'admin_identity'  => $admin_identity,
+      'node_identities' => $node_identities,
+    })
+  }
+
+  file { "${config_dir}/zookeeper.properties":
+    content => epp('nifi_config/zookeeper.properties.epp', {
+      'cluster_nodes' => $cluster_nodes,
+    })
+  }
+
+  file { "${state_dir}/zookeeper":
+    ensure => directory,
+    owner  => 'nifi',
+    group  => 'nifi',
+    mode   => '0755',
+  }
+
+  file { "${state_dir}/zookeeper/myid":
+    ensure  => file,
+    content => "${cluster_nodes[$trusted['certname']]['id']}\n",
+    owner   => 'nifi',
+    group   => 'nifi',
+    mode    => '0755',
+  }
+}
+```
+
 #### Authorization rules
 
 Provision a `/opt/nifi/current/conf/authorizers.xml` configuration
 files to your NiFi nodes
 
-This file adds the certificates of the cluster nodes, as well as the
-certificate for the initial admin. Once the initial admin logs in,
-they can manage users and roles in the web interface.
-
+This example template adds the certificates of the cluster nodes, as
+well as the certificate for the initial admin. Once the initial admin
+logs in, they can manage users and roles in the web interface.
 
 ```xml
+<%- | String $admin_identity,
+      Array[String] $node_identities,
+    | -%>
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <!--
-    This file lists the userGroupProviders, accessPolicyProviders, and authorizers to use when running securely. In order
-    to use a specific authorizer it must be configured here and it's identifier must be specified in the nifi.properties file.
-    If the authorizer is a managedAuthorizer, it may need to be configured with an accessPolicyProvider and an userGroupProvider.
-    This file allows for configuration of them, but they must be configured in order:
 
-    ...
-    all userGroupProviders
-    all accessPolicyProviders
-    all Authorizers
-    ...
+    This file is managed by puppet.
+
 -->
 <authorizers>
-
-    <userGroupProvider>
-        <identifier>file-user-group-provider</identifier>
-        <class>org.apache.nifi.authorization.FileUserGroupProvider</class>
-        <property name="Users File">./conf/users.xml</property>
-        <property name="Legacy Authorized Users File"></property>
-
-        <property name="Initial User Identity 1">CN=nifi-admin.users.example.com</property>
-        <property name="Node identity 1">CN=nifi-01.example.com</property>
-        <property name="Node identity 2">CN=nifi-02.example.com</property>
-    </userGroupProvider>
-
-    <accessPolicyProvider>
-        <identifier>file-access-policy-provider</identifier>
-        <class>org.apache.nifi.authorization.FileAccessPolicyProvider</class>
-        <property name="User Group Provider">file-user-group-provider</property>
-        <property name="Authorizations File">./conf/authorizations.xml</property>
-        <property name="Initial Admin Identity">CN=nifi-admin.users.example.com</property>
-        <property name="Legacy Authorized Users File"></property>
-        <property name="Node identity 1">CN=nifi-01.example.com</property>
-        <property name="Node identity 1">CN=nifi-02.example.com</property>
-        <property name="Node Group"></property>
-    </accessPolicyProvider>
-
     <authorizer>
-        <identifier>managed-authorizer</identifier>
-        <class>org.apache.nifi.authorization.StandardManagedAuthorizer</class>
-        <property name="Access Policy Provider">file-access-policy-provider</property>
+      <identifier>file-provider</identifier>
+      <class>org.apache.nifi.authorization.FileAuthorizer</class>
+      <property name="Authorizations File">./conf/authorizations.xml</property>
+      <property name="Users File">./conf/users.xml</property>
+      <property name="Legacy Authorized Users File"></property>
+
+      <property name="Initial Admin Identity"><%= $admin_identity %></property>
+
+      <%- $node_identities.each | $index, $value | { -%>
+      <property name="Node Identity <%= $params['id'] %>"><%= $ %></property>
+      <%- } -%>
     </authorizer>
 </authorizers>
 ```
 
+#### Zookeeper config
+
+An example zookeeper.properties file
+
+```
+<%- | Hash[Stdlib::Fqdn, Struct[{id => Integer[1]}]] $cluster_nodes | -%>
+# Managed by Puppet
+
+initLimit=10
+autopurge.purgeInterval=24
+syncLimit=5
+tickTime=2000
+dataDir=/var/opt/nifi/state/zookeeper
+autopurge.snapRetainCount=30
+
+<%- $cluster_nodes.each | $cluster_node, $params | { -%>
+server.<%= $params['id'] %>=<%= $cluster_node %>:2888:3888;2181
+<%- } -%>
+```
 
 ## Limitations
 
